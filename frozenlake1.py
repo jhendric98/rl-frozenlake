@@ -13,6 +13,7 @@ win_pct = []
 scores = []
 for i in range(n_games):
     terminated = False
+    truncated = False
     obs = env.reset()
     score = 0
     while not (terminated or truncated):
