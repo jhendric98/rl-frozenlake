@@ -1,3 +1,7 @@
+"""
+This is the first of the exercices in the RL course. The goal is to demonstrate
+a purely random walk through the frozen lake environment.
+"""
 import gym
 import matplotlib.pyplot as plt
 import numpy as np
@@ -11,7 +15,7 @@ for i in range(n_games):
     terminated = False
     obs = env.reset()
     score = 0
-    while not terminated:
+    while not (terminated or truncated):
         observation, reward, terminated, truncated, info = env.step(
             env.action_space.sample()
         )
