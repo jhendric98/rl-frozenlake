@@ -13,15 +13,21 @@ Run 200 episodes without plotting::
 
     python frozenlake1.py --episodes 200 --no-plot
 
-Plot the moving average of the win rate and save it to a file::
+Plot the moving average of the win rate, overlay the episode lengths, and save
+it to a file::
 
     python frozenlake1.py --episodes 500 --moving-average-window 50 \
-        --save-plot results.png
+        --plot-lengths --save-plot results.png
+
+Export the raw statistics for downstream analysis::
+
+    python frozenlake1.py --episodes 500 --no-plot --save-stats results.json
 
 """
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -37,6 +43,7 @@ __all__ = [
     "RandomAgent",
     "plot_episode_stats",
     "run_random_agent",
+    "save_episode_stats",
 ]
 
 
@@ -54,11 +61,14 @@ class EpisodeStats:
     moving_average_window:
         The number of episodes used to compute the moving average.  A value of
         ``0`` indicates that no moving average was calculated.
+    episode_lengths:
+        The number of steps taken in each episode.
     """
 
     episode_rewards: list[float]
     moving_average: list[float]
     moving_average_window: int
+    episode_lengths: list[int]
 
     @property
     def total_episodes(self) -> int:
@@ -86,6 +96,44 @@ class EpisodeStats:
         if not self.episode_rewards:
             return float("nan")
         return float(np.std(self.episode_rewards))
+
+    @property
+    def success_count(self) -> int:
+        """Return the number of episodes with a strictly positive reward."""
+
+        return sum(1 for reward in self.episode_rewards if reward > 0.0)
+
+    @property
+    def success_rate(self) -> float:
+        """Return the proportion of successful episodes."""
+
+        if not self.episode_rewards:
+            return float("nan")
+        return float(self.success_count / len(self.episode_rewards))
+
+    @property
+    def mean_episode_length(self) -> float:
+        """Return the mean number of steps taken per episode."""
+
+        if not self.episode_lengths:
+            return float("nan")
+        return float(np.mean(self.episode_lengths))
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialise the statistics to a JSON-compatible dictionary."""
+
+        return {
+            "total_episodes": self.total_episodes,
+            "moving_average_window": self.moving_average_window,
+            "episode_rewards": list(self.episode_rewards),
+            "moving_average": list(self.moving_average),
+            "episode_lengths": list(self.episode_lengths),
+            "mean_reward": self.mean_reward,
+            "std_reward": self.std_reward,
+            "success_count": self.success_count,
+            "success_rate": self.success_rate,
+            "mean_episode_length": self.mean_episode_length,
+        }
 
 
 class RandomAgent:
@@ -172,6 +220,7 @@ def run_random_agent(
     agent = RandomAgent(env.action_space, seed=seed)
 
     episode_rewards: list[float] = []
+    episode_lengths: list[int] = []
 
     try:
         for episode in range(episodes):
@@ -179,13 +228,16 @@ def run_random_agent(
             terminated = False
             truncated = False
             reward_total = 0.0
+            steps = 0
 
             while not (terminated or truncated):
                 action = agent.act(observation)
                 observation, reward, terminated, truncated, _info = env.step(action)
                 reward_total += float(reward)
+                steps += 1
 
             episode_rewards.append(reward_total)
+            episode_lengths.append(steps)
     finally:
         env.close()
 
@@ -195,6 +247,7 @@ def run_random_agent(
         episode_rewards=episode_rewards,
         moving_average=moving_average,
         moving_average_window=moving_average_window,
+        episode_lengths=episode_lengths,
     )
 
 
@@ -203,6 +256,7 @@ def plot_episode_stats(
     *,
     show: bool = True,
     save_path: Optional[Path] = None,
+    plot_lengths: bool = False,
 ) -> plt.Figure:
     """Plot episodic rewards and optional moving averages.
 
@@ -216,6 +270,9 @@ def plot_episode_stats(
     save_path:
         Optional path to save the generated figure.  The parent directory is
         created automatically if it does not already exist.
+    plot_lengths:
+        Whether to overlay episode lengths on a secondary axis.  The lengths
+        are plotted only when they are available.
 
     Returns
     -------
@@ -244,7 +301,25 @@ def plot_episode_stats(
             color="tab:orange",
         )
 
-    ax.legend()
+    lines = list(ax.lines)
+    labels = [line.get_label() for line in lines]
+
+    length_axis = None
+    if plot_lengths and stats.episode_lengths:
+        length_axis = ax.twinx()
+        length_line = length_axis.plot(
+            stats.episode_lengths,
+            label="Episode length",
+            color="tab:green",
+            alpha=0.6,
+        )[0]
+        length_axis.set_ylabel("Steps")
+        lines.append(length_line)
+        labels.append(length_line.get_label())
+
+    ax.legend(lines, labels, loc="best")
+    if length_axis is not None:
+        length_axis.grid(False)
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
 
     if save_path is not None:
@@ -256,6 +331,16 @@ def plot_episode_stats(
         plt.show()
 
     return fig
+
+
+def save_episode_stats(stats: EpisodeStats, path: Path) -> None:
+    """Persist episode statistics to ``path`` in JSON format."""
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(stats.to_dict(), handle, indent=2)
+        handle.write("\n")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -302,6 +387,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Display the Matplotlib figure (use --no-plot for headless runs)",
     )
+    parser.add_argument(
+        "--plot-lengths",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Overlay episode lengths on the plot",
+    )
+    parser.add_argument(
+        "--save-stats",
+        type=Path,
+        default=None,
+        help="Optional path to export detailed statistics as JSON",
+    )
     return parser
 
 
@@ -324,10 +421,23 @@ def main(args: Optional[Iterable[str]] = None) -> EpisodeStats:
     )
 
     if parsed_args.plot:
-        plot_episode_stats(stats, show=True, save_path=parsed_args.save_plot)
+        plot_episode_stats(
+            stats,
+            show=True,
+            save_path=parsed_args.save_plot,
+            plot_lengths=parsed_args.plot_lengths,
+        )
     elif parsed_args.save_plot is not None:
         # Allow saving plots without showing them via ``--no-plot --save-plot``.
-        plot_episode_stats(stats, show=False, save_path=parsed_args.save_plot)
+        plot_episode_stats(
+            stats,
+            show=False,
+            save_path=parsed_args.save_plot,
+            plot_lengths=parsed_args.plot_lengths,
+        )
+
+    if parsed_args.save_stats is not None:
+        save_episode_stats(stats, parsed_args.save_stats)
 
     return stats
 
